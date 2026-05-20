@@ -26,7 +26,7 @@
   "$defs": {
     "platform": {
       "type": "string",
-      "enum": ["android", "ios", "harmony", "manual"]
+      "enum": ["android", "ios", "harmony", "cangjie", "manual"]
     },
 
     "kind": {

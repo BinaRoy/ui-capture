@@ -7,7 +7,11 @@
   "properties": {
     "schema_version": {"const": 1},
     "adapter": {"type": "string", "description": "workflow.config.json adapter.name"},
-    "platform": {"type": ["string", "null"], "enum": ["android", "ios", null]},
+    "platform": {
+      "type": ["string", "null"],
+      "enum": ["android", "ios", "harmony", "cangjie", "manual", null],
+      "description": "Adapter/platform that produced this manifest. Android, iOS, and Harmony are first-class source capture platforms; cangjie/manual are accepted for derived or degraded artifacts."
+    },
     "mode": {"type": "string", "enum": ["pipeline", "standalone"]},
     "status": {
       "type": "string",
@@ -16,7 +20,11 @@
         "infrastructure_missing",
         "scaffold_pending",
         "adapter_unsupported",
-        "all_pages_failed"
+        "all_pages_failed",
+        "partial",
+        "nav_script_error",
+        "no_pages_requested",
+        "timed_out"
       ],
       "description": "Overall run status. arch-gen should treat anything except 'ok' as degraded input."
     },
@@ -49,7 +57,16 @@
         },
         "status": {
           "type": "string",
-          "enum": ["captured", "failed", "skipped", "identity_mismatch"]
+          "enum": [
+            "captured",
+            "failed",
+            "skipped",
+            "identity_mismatch",
+            "captured_manual",
+            "manual_unbound",
+            "manual_invalid",
+            "manual_pending"
+          ]
         },
         "feature": {
           "type": ["string", "null"],
@@ -70,11 +87,45 @@
           }
         },
         "screenshot": {"type": "string", "description": "path relative to ui/"},
-        "raw": {"type": "string", "description": "path relative to ui/"},
+        "screenshot_fullpage": {"type": "string", "description": "stitched full-page screenshot path relative to ui/, present for scrollable pages"},
+        "raw": {"type": "string", "description": "platform-native dump path relative to ui/ (for example raw.xml, raw.json, or raw.plist)"},
         "duration_ms": {"type": ["integer", "null"]},
+        "capture_method": {"type": "string", "enum": ["auto", "manual"]},
+        "hierarchy_available": {"type": "boolean"},
+        "manual_notes": {"type": "string"},
+        "scroll": {
+          "type": "object",
+          "description": "Scrollable-page summary copied from hierarchy.json so consumers do not need to open every hierarchy.",
+          "properties": {
+            "scrolled": {"type": "boolean"},
+            "viewport_height": {"type": ["integer", "null"], "minimum": 0},
+            "page_total_height": {"type": ["integer", "null"], "minimum": 0},
+            "scroll_steps": {"type": ["integer", "null"], "minimum": 0},
+            "source": {"type": "string"}
+          },
+          "additionalProperties": true
+        },
+        "resources": {
+          "type": "object",
+          "description": "Source-side resource extraction summary.",
+          "properties": {
+            "dir": {"type": "string"},
+            "policy": {"type": ["string", "object", "null"]},
+            "stats": {"type": "object"}
+          },
+          "additionalProperties": true
+        },
+        "warnings": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "resources_error": {"type": "string"},
         "error": {"type": "string"},
-        "html_error": {"type": "string"}
-      }
+        "html_error": {"type": "string"},
+        "hierarchy_md_error": {"type": "string"},
+        "overlay_svg_error": {"type": "string"}
+      },
+      "additionalProperties": true
     }
   }
 }
