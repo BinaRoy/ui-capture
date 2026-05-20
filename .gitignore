@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# Skill outputs (per-project capture dirs live OUTSIDE this repo by convention;
+# but in case anyone runs the skill from within a checkout, ignore these names)
+output_android/
+output_harmony/
+output_ios/
+output_cross/
+workflow_output/
+
+# Scratch / experiments
+/tmp/
+*.bak
+*.orig
+
+# Emulator artifacts that may end up in cwd
+adb.log
+hdc_logd*
+
+# Build / packaging
+build/
+dist/
+*.tgz
+
+# Local-only Claude Code overrides (shared settings.json IS tracked)
+.claude/settings.local.json
+
+# Internal development notes — not shipped with the public skill
+docs/internal/

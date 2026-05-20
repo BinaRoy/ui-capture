@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://huawei.local/ui-capture/hierarchy.schema.json",
+  "title": "hierarchy",
+  "description": "Platform-neutral UI-IR produced by adapters. Single source of truth for cross-platform diff. Schema version: 1.",
+  "type": "object",
+  "required": ["kind", "children"],
+  "properties": {
+    "kind": {"const": "root"},
+    "platform": {"$ref": "#/$defs/platform"},
+    "scrolled": {"type": "boolean"},
+    "viewport_height": {"type": "integer", "minimum": 0},
+    "page_total_height": {"type": "integer", "minimum": 0},
+    "scroll_steps": {
+      "description": "Number of additional scroll frames captured beyond the first viewport. Detailed step metadata lives in scroll_meta.json, not here.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "children": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/node"}
+    }
+  },
+  "additionalProperties": true,
+
+  "$defs": {
+    "platform": {
+      "type": "string",
+      "enum": ["android", "ios", "harmony", "manual"]
+    },
+
+    "kind": {
+      "description": "Unified semantic role across Android/iOS/HarmonyOS. Adapters must map their native class hierarchy to one of these. 'view' is the fallback for unmapped classes.",
+      "type": "string",
+      "enum": [
+        "root", "view",
+        "frame", "linear", "relative", "constraint", "card",
+        "list", "pager", "scroll",
+        "text", "image",
+        "button", "input",
+        "switch", "checkbox", "radio", "radio_group",
+        "slider", "progress",
+        "dropdown",
+        "web", "media",
+        "tabs", "bottom_nav", "nav_drawer",
+        "toolbar", "appbar", "sheet",
+        "chip", "chip_group"
+      ]
+    },
+
+    "bounds": {
+      "description": "Pixel rectangle in fullpage coordinates: [left, top, right, bottom].",
+      "type": "array",
+      "items": {"type": "integer"},
+      "minItems": 4,
+      "maxItems": 4
+    },
+
+    "state": {
+      "description": "Structured boolean state. Captured even when false, so diff can detect transitions. Adapters fill what their platform exposes; unsupported fields are omitted, not nulled.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled":        {"type": "boolean"},
+        "checked":        {"type": "boolean"},
+        "checkable":      {"type": "boolean"},
+        "clickable":      {"type": "boolean"},
+        "long_clickable": {"type": "boolean"},
+        "focused":        {"type": "boolean"},
+        "focusable":      {"type": "boolean"},
+        "selected":       {"type": "boolean"},
+        "scrollable":     {"type": "boolean"},
+        "password":       {"type": "boolean"}
+      }
+    },
+
+    "flags": {
+      "description": "Legacy flag list — kept for back-compat with existing consumers. Prefer `state` (which captures false too). Each entry corresponds to a true-valued attribute.",
+      "type": "array",
+      "items": {"type": "string"}
+    },
+
+    "style": {
+      "description": "Optional visual properties. Filled by adapters that can extract them (e.g. HarmonyOS hidumper). Absent for adapters that cannot (e.g. Android uiautomator).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "color":      {"type": "string", "description": "Foreground color, hex or named."},
+        "background": {"type": "string"},
+        "font_size":  {"type": "number", "minimum": 0},
+        "font_weight": {"type": ["string", "integer"]},
+        "margin":     {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4, "description": "[top, right, bottom, left]"},
+        "padding":    {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
+        "opacity":    {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+
+    "a11y": {
+      "description": "Optional accessibility metadata. Filled by adapters that source data from accessibility trees (e.g. iOS xctree). Absent for adapters that don't.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "label": {"type": "string"},
+        "trait": {"type": "string", "description": "Native accessibility trait, e.g. 'button', 'header', 'link'."},
+        "value": {"type": "string"},
+        "hint":  {"type": "string"}
+      }
+    },
+
+    "node": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind":         {"$ref": "#/$defs/kind"},
+        "class":        {"type": "string", "description": "Native class name. Platform-specific; informational only."},
+        "id":           {"type": "string", "description": "Stable native id where available (Android resource-id, ArkUI id, iOS accessibilityIdentifier)."},
+        "text":         {"type": "string"},
+        "content_desc": {"type": "string"},
+        "package":      {"type": "string", "description": "Android: package name. Other platforms omit."},
+        "bounds":       {"$ref": "#/$defs/bounds"},
+        "state":        {"$ref": "#/$defs/state"},
+        "flags":        {"$ref": "#/$defs/flags"},
+        "style":        {"$ref": "#/$defs/style"},
+        "a11y":         {"$ref": "#/$defs/a11y"},
+        "children":     {
+          "type": "array",
+          "items": {"$ref": "#/$defs/node"}
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

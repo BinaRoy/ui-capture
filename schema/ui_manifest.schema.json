@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ui_manifest",
+  "description": "Output of the ui-capture skill. Consumed by /architecture-gen and Worker/Reviewer agents.",
+  "type": "object",
+  "required": ["schema_version", "adapter", "status", "pages"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "adapter": {"type": "string", "description": "workflow.config.json adapter.name"},
+    "platform": {"type": ["string", "null"], "enum": ["android", "ios", null]},
+    "mode": {"type": "string", "enum": ["pipeline", "standalone"]},
+    "status": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "infrastructure_missing",
+        "scaffold_pending",
+        "adapter_unsupported",
+        "all_pages_failed"
+      ],
+      "description": "Overall run status. arch-gen should treat anything except 'ok' as degraded input."
+    },
+    "stub_reason": {"type": "string"},
+    "config": {"type": "string"},
+    "source_root": {"type": "string"},
+    "feature_json": {"type": "string"},
+    "phases": {
+      "type": "object",
+      "additionalProperties": {"type": "object"}
+    },
+    "pages": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/page"}
+    },
+    "shell_features": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Features that exist in feature.json but have no captured UI surface. arch-gen should treat these as routing / glue only."
+    }
+  },
+  "$defs": {
+    "page": {
+      "type": "object",
+      "required": ["id", "status"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable page id. Conventions: '<feature>' for single main page; '<feature>/<slug>' for multiple main pages; '<feature>#<slug>' for a sub-card embedded in a parent page."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["captured", "failed", "skipped", "identity_mismatch"]
+        },
+        "feature": {
+          "type": ["string", "null"],
+          "description": "feature_id from feature.json that this page belongs to. null if no match."
+        },
+        "class_name": {"type": ["string", "null"]},
+        "source_file": {
+          "type": ["string", "null"],
+          "description": "Path relative to source.root for the class implementing this page."
+        },
+        "identity": {
+          "type": "object",
+          "properties": {
+            "top_component": {"type": "string"},
+            "current_fragment": {"type": ["string", "null"]},
+            "page_class": {"type": "string"},
+            "extra": {"type": "object"}
+          }
+        },
+        "screenshot": {"type": "string", "description": "path relative to ui/"},
+        "raw": {"type": "string", "description": "path relative to ui/"},
+        "duration_ms": {"type": ["integer", "null"]},
+        "error": {"type": "string"},
+        "html_error": {"type": "string"}
+      }
+    }
+  }
+}
