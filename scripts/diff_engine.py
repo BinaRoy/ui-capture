@@ -163,6 +163,40 @@ def _slot_template(text: str) -> Optional[str]:
     return None
 
 
+_DIGIT_RE = re.compile(r"\d+(?:\.\d+)?")
+
+
+def _digit_skeleton(s: str) -> str:
+    """Replace every numeric run with 'N'. Lets us tell apart 'value differs'
+    from 'format differs' inside a slot-template-matched text_mismatch:
+        '15°'   vs '17°'    → 'N°'  == 'N°'    → same skeleton (data_drift)
+        '15°'   vs '24°C'   → 'N°'  != 'N°C'   → different     (format_diff)
+        '0%'    vs '2%'     → 'N%'  == 'N%'    → data_drift
+        '1018 hpa' vs '1024 hPa' → 'N hpa' != 'N hPa' (case)   → format_diff
+    """
+    return _DIGIT_RE.sub("N", s.strip())
+
+
+def _text_mismatch_subkind(src_text: str, tgt_text: str,
+                           strat: Optional[str]) -> str:
+    """Refine a text_mismatch into format_diff / data_drift / content_change.
+
+    Only meaningful when the two texts were aligned via slot_template — that
+    is the evidence that both sides occupy the same semantic slot. Without
+    that evidence the texts may simply be different content.
+    """
+    if strat != "slot_template":
+        return "content_change"
+    sk_s = _digit_skeleton(src_text)
+    sk_t = _digit_skeleton(tgt_text)
+    if sk_s == sk_t:
+        return "data_drift"
+    if sk_s.lower() == sk_t.lower():
+        # Same after lowercasing → casing-only format difference (hpa/hPa)
+        return "format_diff"
+    return "format_diff"
+
+
 # ---------------------------------------------------------------- data shapes
 
 @dataclass
@@ -179,6 +213,7 @@ class FlatNode:
 class Diff:
     type: str                       # missing/extra/kind_mismatch/text_mismatch/state_mismatch/bounds_drift
     severity: str                   # UI-action category (see SEVERITY_ORDER)
+    category: str                   # consumer-facing bucket (see CATEGORY_ORDER)
     match_strategy: Optional[str]   # "id" | "kind_text" | "slot_template" | "positional" | None
     path: str                       # source path (or target path for `extra`)
     source_node: Optional[dict] = None
@@ -426,7 +461,13 @@ def _bounds_drift(b1: list, b2: list, tol_pct: float,
 
 def _state_diff(s1: Optional[dict], s2: Optional[dict]) -> Optional[dict]:
     s1 = s1 or {}; s2 = s2 or {}
-    keys = set(s1) | set(s2)
+    # Strip adapter-schema-asymmetric fields before comparing. Android's
+    # uiautomator emits password / focusable / long_clickable / checkable as
+    # bools on every node; Harmony's uitest dumpLayout omits them. Comparing
+    # them produces ~33 spurious state_mismatch entries per page that carry
+    # no user-visible behavior signal. The fields are kept in the IR for
+    # debugging — only excluded from the cross-platform diff.
+    keys = (set(s1) | set(s2)) - _NOISE_STATE_FIELDS
     changed = {k: {"source": s1.get(k), "target": s2.get(k)}
                for k in keys if s1.get(k) != s2.get(k)}
     return changed or None
@@ -495,8 +536,142 @@ SEVERITY_ORDER = (
     "LAYOUT_POSITION",
     "LAYOUT_SIZE",
     "BEHAVIOR",
+    "DATA_DIVERGENCE",
     "PLATFORM_NOISE",
 )
+
+# Severities that are informational only — excluded from "actionable signal"
+# counts in summary / triage. DATA_DIVERGENCE is a real signal but not one a
+# translation fix can resolve (it reflects different runtime data, not code).
+_INFORMATIONAL_SEVERITIES: frozenset[str] = frozenset({
+    "DATA_DIVERGENCE", "PLATFORM_NOISE",
+})
+
+# A node is "data-bound" if its text content is highly likely set at runtime
+# from external state (API, system clock, user prefs) rather than declared in
+# source layout. Differences across two such nodes usually reflect captures
+# made under different runtime state (different city, different timestamp),
+# not translation gaps.
+
+# Android Hungarian convention: TextView ids prefixed with `tv` + CamelCase.
+_ANDROID_DATA_ID_RE = re.compile(r"^tv[A-Z]")
+
+# Substrings (case-insensitive) inside id that strongly suggest dynamic text.
+_DATA_ID_HINTS: tuple[str, ...] = (
+    "city", "country", "time", "date", "degree", "temp", "press", "wind",
+    "speed", "humid", "feel", "lastupdate", "diff", "uv", "rain", "sun",
+)
+
+# Text-shape patterns that almost always indicate runtime-filled data.
+_DATA_TEXT_RE = re.compile(
+    r"""^(
+        -?\d+(\.\d+)?\s*°[CF]?               # 18°  18°C
+      | \d{1,2}:\d{2}(\s*[AP]M)?             # 04:00
+      | \d{1,2}/\d{1,2}(/\d{2,4})?           # 5/22
+      | \d+(\.\d+)?\s*%                      # 87%
+      | \d+(\.\d+)?\s*(hpa|hpa|mmhg|inhg|mph|km/h|ms|kmh|m/s)  # 1008 hPa
+      | -?\d+(\.\d+)?                        # pure number
+    )$""",
+    re.VERBOSE | re.IGNORECASE,
+)
+
+
+def _is_data_bound(node: Optional[dict]) -> bool:
+    """Heuristically detect runtime-filled text nodes. Platform-agnostic.
+
+    Signals (any one is enough):
+      - Android-style `tv<CamelCase>` id
+      - id contains a common dynamic-data substring (city/time/temp/...)
+      - text matches a numeric / time / unit / percentage pattern
+
+    Heuristic — produces false positives on hand-typed constants matching
+    these shapes (e.g. a fixed "100%" label). The downstream impact is the
+    diff is bucketed to DATA_DIVERGENCE rather than dropped, so it remains
+    visible to an agent that wants to re-classify.
+    """
+    if not node:
+        return False
+    raw_id = (node.get("id") or "").strip()
+    nid = raw_id.rsplit("/", 1)[-1]   # strip "pkg:id/" namespace if present
+    if nid:
+        if _ANDROID_DATA_ID_RE.match(nid):
+            return True
+        lower = nid.lower()
+        if any(h in lower for h in _DATA_ID_HINTS):
+            return True
+    text = (node.get("text") or "").strip()
+    if text and _DATA_TEXT_RE.match(text):
+        return True
+    return False
+
+# Consumer-facing categorization. Independent of `severity` (which is the
+# UI-design lens). `category` is for downstream agents/scripts that want to
+# quickly filter "real" diffs vs. cross-platform noise without re-deriving
+# what every entry means.
+#
+#   chrome_wrapper       Pure structural wrapper (no text / id / content_desc).
+#                        Filter out by default.
+#   schema_asymmetry     Adapter-schema difference (e.g. Android-only state
+#                        bool fields). Currently stripped upstream in
+#                        _state_diff, so this category is reserved for future
+#                        cross-platform schema gaps.
+#   data_drift           Same slot template on both sides, only the filled
+#                        value differs (city name, time, temperature number).
+#                        Downgraded; the format is consistent.
+#   format_diff          Matched element, text differs in format/casing/unit
+#                        (e.g. "16°" vs "24°C", "hpa" vs "hPa").
+#   implementation_diff  Two sides express the same semantic with different
+#                        primitives (e.g. ImageView icon vs emoji Text).
+#                        Detection requires pair_hint logic — not implemented
+#                        in this pass; reserved.
+#   real_diff            Genuine layout / content / behavior difference.
+CATEGORY_ORDER = (
+    "real_diff",
+    "format_diff",
+    "implementation_diff",
+    "data_drift",
+    "chrome_wrapper",
+    "schema_asymmetry",
+)
+
+
+_STRUCTURAL_KINDS = frozenset({
+    "linear", "frame", "scroll", "view", "list", "stack", "row", "column", "flex",
+})
+
+
+def _classify_category(diff_type: str, source_node: Optional[dict],
+                       target_node: Optional[dict], details: dict,
+                       strat: Optional[str]) -> str:
+    """Bucket each diff for agent-side filtering. Independent of severity."""
+    if diff_type in ("missing", "extra"):
+        n = source_node if diff_type == "missing" else target_node
+        n = n or {}
+        text = (n.get("text") or "").strip()
+        desc = (n.get("content_desc") or "").strip()
+        if text or desc:
+            return "real_diff"
+        # No user-visible text. An id alone counts as semantic only if the
+        # node is NOT a generic structural container — framework-assigned
+        # ids on layout wrappers (e.g. Android's `action_bar_root`) are not
+        # user-visible signal.
+        if n.get("id") and n.get("kind") not in _STRUCTURAL_KINDS:
+            return "real_diff"
+        return "chrome_wrapper"
+    if diff_type == "text_mismatch":
+        # P0-④ refines this: slot_template match → split format_diff vs
+        # data_drift based on whether the template itself differs. Until
+        # then, slot_template-matched text_mismatch is treated as format_diff.
+        subkind = (details or {}).get("subkind")
+        if subkind in ("data_drift", "format_diff", "content_change"):
+            return subkind if subkind != "content_change" else "real_diff"
+        if strat == "slot_template":
+            return "format_diff"
+        return "real_diff"
+    if diff_type == "state_mismatch":
+        return "real_diff"   # noise fields already stripped in _state_diff
+    # kind_mismatch, bounds_drift → real_diff
+    return "real_diff"
 
 # State fields whose differences are purely adapter-normalization (Android
 # emits them as bool, HarmonyOS omits them) → classify as PLATFORM_NOISE.
@@ -520,14 +695,26 @@ def _classify_severity(diff_type: str, source_node: Optional[dict],
         # Has visible text → real feature missing; pure structural wrapper → noise
         text = (source_node or {}).get("text") or ""
         if text.strip():
+            if _is_data_bound(source_node):
+                return "DATA_DIVERGENCE"
             return "MISSING_FEATURE"
         return "PLATFORM_NOISE"
     if diff_type == "extra":
         text = (target_node or {}).get("text") or ""
         if text.strip():
+            if _is_data_bound(target_node):
+                return "DATA_DIVERGENCE"
             return "EXTRA_FEATURE"
         return "PLATFORM_NOISE"
     if diff_type == "text_mismatch":
+        # Slot-template "data_drift" subkind (same template, different value)
+        # is by definition data-bound — surface as DATA_DIVERGENCE.
+        if details.get("subkind") == "data_drift":
+            return "DATA_DIVERGENCE"
+        # Either-side data-bound text mismatch → also DATA_DIVERGENCE. Catches
+        # cases the slot-template detector missed (free-form city names, etc.)
+        if _is_data_bound(source_node) or _is_data_bound(target_node):
+            return "DATA_DIVERGENCE"
         return "TEXT_FORMAT"
     if diff_type == "kind_mismatch":
         return "LAYOUT_PARADIGM"
@@ -696,10 +883,13 @@ def compute_diff(
               "text_mismatch": 0, "state_mismatch": 0, "bounds_drift": 0}
 
     def _emit(diff_type, source_node, target_node, details, path, strat):
-        sev = _classify_severity(diff_type, source_node, target_node, details or {})
+        details = details or {}
+        sev = _classify_severity(diff_type, source_node, target_node, details)
+        cat = _classify_category(diff_type, source_node, target_node, details, strat)
         diffs.append(Diff(
-            type=diff_type, severity=sev, match_strategy=strat, path=path,
-            source_node=source_node, target_node=target_node, details=details or {},
+            type=diff_type, severity=sev, category=cat, match_strategy=strat,
+            path=path, source_node=source_node, target_node=target_node,
+            details=details,
         ))
         counts[diff_type] += 1
 
@@ -722,8 +912,11 @@ def compute_diff(
         s_text = (s_node.get("text") or "").strip()
         t_text = (t_node.get("text") or "").strip()
         if s_text != t_text and (s_text or t_text):
+            subkind = _text_mismatch_subkind(s_text, t_text, strat)
             _emit("text_mismatch", _short_node(s_node), _short_node(t_node),
-                  {"source_text": s_text, "target_text": t_text}, s_path, strat)
+                  {"source_text": s_text, "target_text": t_text,
+                   "subkind": subkind},
+                  s_path, strat)
         st = _state_diff(s_node.get("state"), t_node.get("state"))
         if st:
             _emit("state_mismatch", _short_node(s_node), _short_node(t_node),
@@ -737,6 +930,14 @@ def compute_diff(
     by_severity = {s: 0 for s in SEVERITY_ORDER}
     for d in diffs:
         by_severity[d.severity] = by_severity.get(d.severity, 0) + 1
+
+    by_category = {c: 0 for c in CATEGORY_ORDER}
+    for d in diffs:
+        by_category[d.category] = by_category.get(d.category, 0) + 1
+
+    total_diffs = len(diffs)
+    informational = sum(by_severity.get(s, 0) for s in _INFORMATIONAL_SEVERITIES)
+    actionable_signal = total_diffs - informational
 
     summary = {
         **counts,
@@ -753,6 +954,11 @@ def compute_diff(
             "positional":    sum(1 for _, _, s in matched if s == "positional"),
         },
         "by_severity": by_severity,
+        "by_category": by_category,
+        "total": total_diffs,
+        "actionable_signal": actionable_signal,
+        "signal_pct": (round(actionable_signal * 100 / total_diffs, 1)
+                       if total_diffs else 0.0),
     }
 
     return DiffResult(
@@ -787,6 +993,9 @@ _SEVERITY_HEADERS: dict[str, tuple[str, str]] = {
                          "Action: investigate width/height constraints, padding, or wrap settings."),
     "BEHAVIOR":         ("Interactive behavior differences",
                          "Action: align clickable / enabled / scrollable affordances."),
+    "DATA_DIVERGENCE":  ("Runtime data divergence (API / clock / locale state differs)",
+                         "Action: usually none — captures taken under different runtime data. "
+                         "Re-classify only if a node was incorrectly flagged as data-bound."),
     "PLATFORM_NOISE":   ("Platform noise (DPI rounding, adapter schema variance)",
                          "Action: none expected; review only if a category seems mis-classified."),
 }
@@ -866,6 +1075,14 @@ def render_markdown(result: DiffResult) -> str:
     # ---- Quick action summary
     lines.append("## Quick action summary")
     lines.append("")
+    total = s.get("total", sum(sev_counts.values()))
+    actionable = s.get("actionable_signal",
+                       total - sum(sev_counts.get(k, 0) for k in _INFORMATIONAL_SEVERITIES))
+    pct = s.get("signal_pct", 0.0)
+    lines.append(f"**Actionable signal**: {actionable} of {total} diffs "
+                 f"({pct}%) — excludes DATA_DIVERGENCE + PLATFORM_NOISE. "
+                 f"Focus fixes on rows above the fold.")
+    lines.append("")
     lines.append("Diff entries grouped by UI-design impact, in fix-priority order.")
     lines.append("")
     lines.append("| severity | count | fix priority |")
@@ -878,6 +1095,7 @@ def render_markdown(result: DiffResult) -> str:
         "LAYOUT_POSITION":  "P2 — visual alignment",
         "LAYOUT_SIZE":      "P2 — visual sizing",
         "BEHAVIOR":         "P1 — interaction affordance",
+        "DATA_DIVERGENCE":  "informational — runtime data differs",
         "PLATFORM_NOISE":   "informational — expected noise",
     }
     for sev in SEVERITY_ORDER:
@@ -890,24 +1108,19 @@ def render_markdown(result: DiffResult) -> str:
         if not items:
             continue
         heading, guidance = _SEVERITY_HEADERS[sev]
-        is_noise = (sev == "PLATFORM_NOISE")
-        if is_noise:
-            lines.append(f"## {sev} — {heading} ({len(items)})")
-            lines.append("")
-            lines.append(f"> {guidance}")
-            lines.append("")
-            lines.append(f"<details><summary>Show {len(items)} noise entries</summary>")
-            lines.append("")
-        else:
-            lines.append(f"## {sev} — {heading} ({len(items)})")
-            lines.append("")
-            lines.append(f"> {guidance}")
+        fold = sev in _INFORMATIONAL_SEVERITIES
+        lines.append(f"## {sev} — {heading} ({len(items)})")
+        lines.append("")
+        lines.append(f"> {guidance}")
+        lines.append("")
+        if fold:
+            lines.append(f"<details><summary>Show {len(items)} entries</summary>")
             lines.append("")
         for d in items[:50]:
             lines.extend(_fmt_diff_entry(d))
         if len(items) > 50:
             lines.append(f"- _… and {len(items) - 50} more (see diff.json)_")
-        if is_noise:
+        if fold:
             lines.append("")
             lines.append("</details>")
         lines.append("")
