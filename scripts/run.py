@@ -704,18 +704,6 @@ def _capture_one(adapter, page_id: str) -> dict:
             )
         except Exception as exc:
             page["html_error"] = str(exc)
-        # A.5 side-products: git-diff friendly text tree + leaf SVG overlay.
-        # Failures here must not block the capture — they're auxiliary artefacts.
-        try:
-            from hierarchy_md import render as render_md
-            (out_dir / "hierarchy.md").write_text(render_md(result.hierarchy), encoding="utf-8")
-        except Exception as exc:
-            page["hierarchy_md_error"] = str(exc)
-        try:
-            from svg_overlay import render as render_svg
-            (out_dir / "overlay.svg").write_text(render_svg(result.hierarchy), encoding="utf-8")
-        except Exception as exc:
-            page["overlay_svg_error"] = str(exc)
     if result.screenshot_path:
         page["screenshot"] = result.screenshot_path.relative_to(UI_ROOT).as_posix()
     if result.fullpage_screenshot_path:
