@@ -180,6 +180,17 @@ def _bool_attr(v) -> Optional[bool]:
     return None
 
 
+# Node-attribute classes that identify the system StatusBar / system-UI window
+# emitted at the top level of uitest dumpLayout. They are not part of the app
+# under test and have no counterpart in Android's uiautomator dump.
+_SYSTEM_WINDOW_TYPES = frozenset({"WindowScene"})
+
+
+def _is_system_window(node: dict) -> bool:
+    a = node.get("attributes") or {}
+    return a.get("type") in _SYSTEM_WINDOW_TYPES
+
+
 # ------------------------------------------------------------------ adapter
 
 class HarmonyAdapter(Adapter):
@@ -493,6 +504,12 @@ class HarmonyAdapter(Adapter):
         # no attributes — keep both shapes working by detecting and unwrapping.
         if not children and data.get("attributes"):
             children = [data]
+
+        # Drop the system StatusBar window subtree — uitest dumpLayout includes
+        # it as a sibling WindowScene at top level, but Android's uiautomator
+        # dump doesn't. Comparing them across platforms produces ~30 spurious
+        # missing/extra diffs that don't reflect app-UI differences.
+        children = [c for c in children if not _is_system_window(c)]
 
         return {
             "kind": "root",
